@@ -61,7 +61,10 @@ pub mod signal;
 pub mod sink;
 pub mod sinks;
 pub mod sources;
+pub(crate) mod stats;
 pub mod stream;
+#[cfg(feature = "api-client")]
+mod tap;
 pub mod tcp;
 pub mod template;
 pub mod test_util;
@@ -73,9 +76,9 @@ pub mod trace;
 pub mod transforms;
 pub mod trigger;
 pub mod types;
-#[cfg(any(feature = "sources-utils-udp", feature = "sinks-utils-udp"))]
 pub mod udp;
 pub mod unit_test;
+pub(crate) mod utilization;
 pub mod validate;
 #[cfg(windows)]
 pub mod vector_windows;
@@ -118,21 +121,4 @@ mod built_info {
 
 pub fn get_hostname() -> std::io::Result<String> {
     Ok(hostname::get()?.to_string_lossy().into())
-}
-
-// This is a private implementation of the unstable `bool_to_option`
-// feature. This can be removed once this stabilizes:
-// https://github.com/rust-lang/rust/issues/64260
-trait BoolAndSome {
-    fn and_some<T>(self, value: T) -> Option<T>;
-}
-
-impl BoolAndSome for bool {
-    fn and_some<T>(self, value: T) -> Option<T> {
-        if self {
-            Some(value)
-        } else {
-            None
-        }
-    }
 }

@@ -8,6 +8,7 @@ use crate::{
 use bytes::Bytes;
 use grok::Pattern;
 use serde::{Deserialize, Serialize};
+use shared::TimeZone;
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
 use std::str;
@@ -27,6 +28,7 @@ pub struct GrokParserConfig {
     #[derivative(Default(value = "true"))]
     pub drop_field: bool,
     pub types: HashMap<String, String>,
+    pub timezone: Option<TimeZone>,
 }
 
 inventory::submit! {
@@ -38,7 +40,7 @@ impl_generate_config_from_default!(GrokParserConfig);
 #[async_trait::async_trait]
 #[typetag::serde(name = "grok_parser")]
 impl TransformConfig for GrokParserConfig {
-    async fn build(&self, _globals: &GlobalOptions) -> crate::Result<Transform> {
+    async fn build(&self, globals: &GlobalOptions) -> crate::Result<Transform> {
         let field = self
             .field
             .clone()
@@ -46,7 +48,8 @@ impl TransformConfig for GrokParserConfig {
 
         let mut grok = grok::Grok::with_patterns();
 
-        let types = parse_conversion_map(&self.types)?;
+        let timezone = self.timezone.unwrap_or(globals.timezone);
+        let types = parse_conversion_map(&self.types, timezone)?;
 
         Ok(grok
             .compile(&self.pattern, true)
@@ -168,18 +171,22 @@ mod tests {
         types: &[(&str, &str)],
     ) -> LogEvent {
         let event = Event::from(event);
+        let metadata = event.metadata().clone();
         let mut parser = GrokParserConfig {
             pattern: pattern.into(),
             field: field.map(|s| s.into()),
             drop_field,
             types: types.iter().map(|&(k, v)| (k.into(), v.into())).collect(),
+            timezone: Default::default(),
         }
         .build(&GlobalOptions::default())
         .await
         .unwrap();
         let parser = parser.as_function();
 
-        parser.transform_one(event).unwrap().into_log()
+        let result = parser.transform_one(event).unwrap().into_log();
+        assert_eq!(result.metadata(), &metadata);
+        result
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use component::ComponentDescription;
 use indexmap::IndexMap; // IndexMap preserves insertion order, allowing us to output errors in the same order they are present in the file
 use serde::{Deserialize, Serialize};
+use shared::TimeZone;
 use snafu::{ResultExt, Snafu};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
@@ -34,8 +35,11 @@ pub mod watcher;
 pub use builder::ConfigBuilder;
 pub use diff::ConfigDiff;
 pub use format::{Format, FormatHint};
-pub use loading::{load_from_paths, load_from_str, merge_path_lists, process_paths, CONFIG_PATHS};
-pub use log_schema::{log_schema, LogSchema, LOG_SCHEMA};
+pub use loading::{
+    load_builder_from_paths, load_from_paths, load_from_str, merge_path_lists, process_paths,
+    CONFIG_PATHS,
+};
+pub use log_schema::{init_log_schema, log_schema, LogSchema};
 pub use unit_test::build_unit_tests_main as build_unit_tests;
 pub use validation::warnings;
 
@@ -52,15 +56,15 @@ pub struct Config {
     expansions: IndexMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct GlobalOptions {
     #[serde(default = "default_data_dir")]
     pub data_dir: Option<PathBuf>,
-    #[serde(
-        skip_serializing_if = "crate::serde::skip_serializing_if_default",
-        default
-    )]
+    #[serde(skip_serializing_if = "crate::serde::skip_serializing_if_default")]
     pub log_schema: LogSchema,
+    #[serde(skip_serializing_if = "crate::serde::skip_serializing_if_default")]
+    pub timezone: TimeZone,
 }
 
 pub fn default_data_dir() -> Option<PathBuf> {
@@ -188,13 +192,7 @@ macro_rules! impl_generate_config_from_default {
 #[async_trait]
 #[typetag::serde(tag = "type")]
 pub trait SourceConfig: core::fmt::Debug + Send + Sync {
-    async fn build(
-        &self,
-        name: &str,
-        globals: &GlobalOptions,
-        shutdown: ShutdownSignal,
-        out: Pipeline,
-    ) -> crate::Result<sources::Source>;
+    async fn build(&self, cx: SourceContext) -> crate::Result<sources::Source>;
 
     fn output_type(&self) -> DataType;
 
@@ -203,6 +201,43 @@ pub trait SourceConfig: core::fmt::Debug + Send + Sync {
     /// Resources that the source is using.
     fn resources(&self) -> Vec<Resource> {
         Vec::new()
+    }
+}
+
+pub struct SourceContext {
+    pub name: String,
+    pub globals: GlobalOptions,
+    pub shutdown: ShutdownSignal,
+    pub out: Pipeline,
+}
+
+impl SourceContext {
+    #[cfg(test)]
+    pub fn new_shutdown(
+        name: &str,
+        out: Pipeline,
+    ) -> (Self, crate::shutdown::SourceShutdownCoordinator) {
+        let mut shutdown = crate::shutdown::SourceShutdownCoordinator::default();
+        let (shutdown_signal, _) = shutdown.register_source(name);
+        (
+            Self {
+                name: name.into(),
+                globals: GlobalOptions::default(),
+                shutdown: shutdown_signal,
+                out,
+            },
+            shutdown,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn new_test(out: Pipeline) -> Self {
+        Self {
+            name: "default".into(),
+            globals: GlobalOptions::default(),
+            shutdown: ShutdownSignal::noop(),
+            out,
+        }
     }
 }
 
@@ -520,19 +555,6 @@ impl Config {
     }
 }
 
-fn handle_warnings(warnings: Vec<String>, deny_warnings: bool) -> Result<(), Vec<String>> {
-    if !warnings.is_empty() {
-        if deny_warnings {
-            return Err(warnings);
-        } else {
-            for warning in warnings {
-                warn!("{}", &warning);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(all(
     test,
     feature = "sources-file",
@@ -557,7 +579,7 @@ mod test {
                   inputs = ["in"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .unwrap();
 
@@ -580,7 +602,7 @@ mod test {
                   inputs = ["in"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .unwrap();
 
@@ -613,7 +635,7 @@ mod test {
                   inputs = ["in"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .unwrap();
 
@@ -635,7 +657,7 @@ mod test {
                   inputs = ["in"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .unwrap();
 
@@ -661,7 +683,7 @@ mod test {
                               type = "check_fields"
                               "message.equals" = "Sorry, I'm busy this week Cecil"
                     "#},
-                    Some(Format::TOML),
+                    Some(Format::Toml),
                 )
                 .unwrap()
             ),
@@ -688,7 +710,7 @@ mod test {
                   inputs = ["in"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .unwrap();
 
@@ -709,7 +731,7 @@ mod test {
                           inputs = ["in"]
                           encoding = "json"
                     "#},
-                    Some(Format::TOML),
+                    Some(Format::Toml),
                 )
                 .unwrap()
             ),
@@ -853,7 +875,7 @@ mod resource_tests {
                   inputs = ["in0","in1"]
                   encoding = "json"
             "#},
-            Some(Format::TOML),
+            Some(Format::Toml),
         )
         .is_err());
     }

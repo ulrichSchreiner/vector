@@ -1,16 +1,14 @@
-use super::{builder::ConfigBuilder, handle_warnings, validation, Config, TransformOuter};
+use super::{builder::ConfigBuilder, validation, Config, TransformOuter};
 use indexmap::IndexMap;
 
-pub fn compile(mut builder: ConfigBuilder, deny_warnings: bool) -> Result<Config, Vec<String>> {
+pub fn compile(mut builder: ConfigBuilder) -> Result<(Config, Vec<String>), Vec<String>> {
     let mut errors = Vec::new();
 
     expand_wildcards(&mut builder);
 
     let expansions = expand_macros(&mut builder)?;
 
-    if let Err(warn) = handle_warnings(validation::warnings(&builder), deny_warnings) {
-        errors.extend(warn);
-    }
+    let warnings = validation::warnings(&builder);
 
     if let Err(type_errors) = validation::check_shape(&builder) {
         errors.extend(type_errors);
@@ -25,17 +23,20 @@ pub fn compile(mut builder: ConfigBuilder, deny_warnings: bool) -> Result<Config
     }
 
     if errors.is_empty() {
-        Ok(Config {
-            global: builder.global,
-            #[cfg(feature = "api")]
-            api: builder.api,
-            healthchecks: builder.healthchecks,
-            sources: builder.sources,
-            sinks: builder.sinks,
-            transforms: builder.transforms,
-            tests: builder.tests,
-            expansions,
-        })
+        Ok((
+            Config {
+                global: builder.global,
+                #[cfg(feature = "api")]
+                api: builder.api,
+                healthchecks: builder.healthchecks,
+                sources: builder.sources,
+                sinks: builder.sinks,
+                transforms: builder.transforms,
+                tests: builder.tests,
+                expansions,
+            },
+            warnings,
+        ))
     } else {
         Err(errors)
     }
@@ -122,12 +123,13 @@ fn expand_wildcards_inner(inputs: &mut Vec<String>, name: &str, candidates: &[St
 mod test {
     use super::*;
     use crate::{
-        config::{DataType, GlobalOptions, SinkConfig, SinkContext, SourceConfig, TransformConfig},
-        shutdown::ShutdownSignal,
+        config::{
+            DataType, GlobalOptions, SinkConfig, SinkContext, SourceConfig, SourceContext,
+            TransformConfig,
+        },
         sinks::{Healthcheck, VectorSink},
         sources::Source,
         transforms::Transform,
-        Pipeline,
     };
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
@@ -144,13 +146,7 @@ mod test {
     #[async_trait]
     #[typetag::serde(name = "mock")]
     impl SourceConfig for MockSourceConfig {
-        async fn build(
-            &self,
-            _name: &str,
-            _globals: &GlobalOptions,
-            _shutdown: ShutdownSignal,
-            _out: Pipeline,
-        ) -> crate::Result<Source> {
+        async fn build(&self, _cx: SourceContext) -> crate::Result<Source> {
             unimplemented!()
         }
 

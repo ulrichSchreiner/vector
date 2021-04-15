@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     buffers,
-    config::{DataType, SinkContext},
+    config::{DataType, SinkContext, SourceContext},
     event::Event,
     internal_events::{EventIn, EventOut, EventProcessed, EventZeroIn},
     shutdown::SourceShutdownCoordinator,
@@ -54,17 +54,20 @@ pub async fn build_pieces(
         .iter()
         .filter(|(name, _)| diff.sources.contains_new(&name))
     {
-        let (tx, rx) = tokio::sync::mpsc::channel(1000);
+        let (tx, rx) = futures::channel::mpsc::channel(1000);
         let pipeline = Pipeline::from_sender(tx, vec![]);
 
         let typetag = source.source_type();
 
         let (shutdown_signal, force_shutdown_tripwire) = shutdown_coordinator.register_source(name);
 
-        let server = match source
-            .build(&name, &config.global, shutdown_signal, pipeline)
-            .await
-        {
+        let context = SourceContext {
+            name: name.into(),
+            globals: config.global.clone(),
+            shutdown: shutdown_signal,
+            out: pipeline,
+        };
+        let server = match source.build(context).await {
             Err(error) => {
                 errors.push(format!("Source \"{}\": {}", name, error));
                 continue;
@@ -119,6 +122,7 @@ pub async fn build_pieces(
 
         let (input_tx, input_rx) = futures::channel::mpsc::channel(100);
         let input_tx = buffers::BufferInputCloner::Memory(input_tx, buffers::WhenFull::Block);
+        let input_rx = crate::utilization::wrap(input_rx);
 
         let (output, control) = Fanout::new();
 
@@ -209,11 +213,13 @@ pub async fn build_pieces(
             // which will enable us to reuse rx to rebuild
             // old configuration by passing this Arc<Mutex<Option<_>>>
             // yet again.
-            let mut rx = rx
+            let rx = rx
                 .lock()
                 .unwrap()
                 .take()
                 .expect("Task started but input has been taken.");
+
+            let mut rx = Box::pin(crate::utilization::wrap(rx));
 
             sink.run(
                 rx.by_ref()

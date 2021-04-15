@@ -119,9 +119,14 @@ components: sinks: [Name=string]: {
 		if features.send != _|_ {
 			if features.send.compression.enabled {
 				compression: {
-					common:      true
-					description: "The compression strategy used to compress the encoded event data before transmission."
-					required:    false
+					common: true
+					description: """
+						The compression strategy used to compress the encoded event data before transmission.
+
+						Some cloud storage API clients and browsers will handle decompression transparently,
+						so files may not always appear to be compressed depending how they are accessed.
+						"""
+					required: false
 					type: string: {
 						default: features.send.compression.default
 						enum: {
@@ -156,9 +161,9 @@ components: sinks: [Name=string]: {
 							}
 						}
 
-						if features.healthcheck.enabled {except_fields: {
+						except_fields: {
 							common:      false
-							description: "Prevent the sink from encoding the specified labels."
+							description: "Prevent the sink from encoding the specified fields."
 							required:    false
 							type: array: {
 								default: null
@@ -169,31 +174,30 @@ components: sinks: [Name=string]: {
 							}
 						}
 
-							only_fields: {
-								common:      false
-								description: "Prevent the sink from encoding the specified labels."
-								required:    false
-								type: array: {
-									default: null
-									items: type: string: {
-										examples: ["message", "parent.child"]
-										syntax: "field_path"
-									}
+						only_fields: {
+							common:      false
+							description: "Prevent the sink from encoding the specified fields."
+							required:    false
+							type: array: {
+								default: null
+								items: type: string: {
+									examples: ["message", "parent.child"]
+									syntax: "field_path"
 								}
 							}
+						}
 
-							timestamp_format: {
-								common:      false
-								description: "How to format event timestamps."
-								required:    false
-								type: string: {
-									default: "rfc3339"
-									enum: {
-										rfc3339: "Formats as a RFC3339 string"
-										unix:    "Formats as a unix timestamp"
-									}
-									syntax: "literal"
+						timestamp_format: {
+							common:      false
+							description: "How to format event timestamps."
+							required:    false
+							type: string: {
+								default: "rfc3339"
+								enum: {
+									rfc3339: "Formats as a RFC3339 string"
+									unix:    "Formats as a unix timestamp"
 								}
+								syntax: "literal"
 							}
 						}
 					}

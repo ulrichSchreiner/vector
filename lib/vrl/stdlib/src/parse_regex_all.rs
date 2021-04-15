@@ -23,21 +23,43 @@ impl Function for ParseRegexAll {
                 kind: kind::ANY,
                 required: true,
             },
+            Parameter {
+                keyword: "numeric_groups",
+                kind: kind::BOOLEAN,
+                required: false,
+            },
         ]
     }
 
     fn compile(&self, mut arguments: ArgumentList) -> Compiled {
         let value = arguments.required("value");
         let pattern = arguments.required_regex("pattern")?;
+        let numeric_groups = arguments
+            .optional("numeric_groups")
+            .unwrap_or_else(|| expr!(false));
 
-        Ok(Box::new(ParseRegexAllFn { value, pattern }))
+        Ok(Box::new(ParseRegexAllFn {
+            value,
+            pattern,
+            numeric_groups,
+        }))
     }
 
     fn examples(&self) -> &'static [Example] {
-        &[Example {
-            title: "Simple match",
-            source: r#"parse_regex_all!("apples and carrots, peaches and peas", r'(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)')"#,
-            result: Ok(indoc! { r#"[
+        &[
+            Example {
+                title: "Simple match",
+                source: r#"parse_regex_all!("apples and carrots, peaches and peas", r'(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)')"#,
+                result: Ok(indoc! { r#"[
+               {"fruit": "apples",
+                "veg": "carrots"},
+               {"fruit": "peaches",
+                "veg": "peas"}]"# }),
+            },
+            Example {
+                title: "Numeric groups",
+                source: r#"parse_regex_all!("apples and carrots, peaches and peas", r'(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)', numeric_groups: true)"#,
+                result: Ok(indoc! { r#"[
                {"fruit": "apples",
                 "veg": "carrots",
                 "0": "apples and carrots",
@@ -48,7 +70,8 @@ impl Function for ParseRegexAll {
                 "0": "peaches and peas",
                 "1": "peaches",
                 "2": "peas"}]"# }),
-        }]
+            },
+        ]
     }
 }
 
@@ -56,17 +79,21 @@ impl Function for ParseRegexAll {
 pub(crate) struct ParseRegexAllFn {
     value: Box<dyn Expression>,
     pattern: Regex,
+    numeric_groups: Box<dyn Expression>,
 }
 
 impl Expression for ParseRegexAllFn {
     fn resolve(&self, ctx: &mut Context) -> Resolved {
         let bytes = self.value.resolve(ctx)?.try_bytes()?;
         let value = String::from_utf8_lossy(&bytes);
+        let numeric_groups = self.numeric_groups.resolve(ctx)?.try_boolean()?;
 
         Ok(self
             .pattern
             .captures_iter(&value)
-            .map(|capture| util::capture_regex_to_map(&self.pattern, capture).into())
+            .map(|capture| {
+                util::capture_regex_to_map(&self.pattern, capture, numeric_groups).into()
+            })
             .collect::<Vec<Value>>()
             .into())
     }
@@ -82,65 +109,42 @@ impl Expression for ParseRegexAllFn {
     }
 }
 
-/*
 #[cfg(test)]
 #[allow(clippy::trivial_regex)]
 mod tests {
     use super::*;
 
-    vrl::test_type_def![
-        value_string {
-            expr: |_| ParseRegexAllFn {
-                value: Literal::from("foo").boxed(),
-                pattern: Regex::new("^(?P<group>.*)$").unwrap(),
-            },
-            def: TypeDef { kind: Kind::Array,
-                           inner_type_def: Some(inner_type_def!([ TypeDef::from(Kind::Map)
-                                                                  .with_inner_type(Some(inner_type_def! ({ "0": Kind::Bytes,
-                                                                                                           "1": Kind::Bytes,
-                                                                                                           "group": Kind::Bytes
-                                                                  }))) ])),
-                           ..Default::default() },
-        }
-
-        value_non_string {
-            expr: |_| ParseRegexAllFn {
-                value: Literal::from(1).boxed(),
-                pattern: Regex::new("^(?P<group>.*)$").unwrap(),
-            },
-            def: TypeDef { fallible: true,
-                           kind: Kind::Array,
-                           inner_type_def: Some(inner_type_def!([ TypeDef::from(Kind::Map)
-                                                                  .with_inner_type(Some(inner_type_def! ({ "0": Kind::Bytes,
-                                                                                                           "1": Kind::Bytes,
-                                                                                                           "group": Kind::Bytes
-                                                                  }))) ])),
-            },
-        }
-
-        value_optional {
-            expr: |_| ParseRegexAllFn {
-                value: Box::new(Noop),
-                pattern: Regex::new("^(?P<group>.*)$").unwrap(),
-            },
-            def: TypeDef { fallible: true,
-                           kind: Kind::Array,
-                           inner_type_def: Some(inner_type_def!([ TypeDef::from(Kind::Map)
-                                                                  .with_inner_type(Some(inner_type_def! ({ "0": Kind::Bytes,
-                                                                                                           "1": Kind::Bytes,
-                                                                                                           "group": Kind::Bytes
-                                                                  }))) ])),
-            },
-        }
-    ];
-
     test_function![
-        find_all => ParseRegexAll;
+        parse_regex_all => ParseRegexAll;
 
         matches {
             args: func_args![
                 value: "apples and carrots, peaches and peas",
-                pattern: Regex::new(r#"(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)"#).unwrap()
+                pattern: Regex::new(r#"(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)"#).unwrap(),
+            ],
+            want: Ok(value!([{"fruit": "apples",
+                              "veg": "carrots"},
+                             {"fruit": "peaches",
+                              "veg": "peas"}])),
+            tdef: TypeDef::new()
+                .fallible()
+                .array_mapped::<(), TypeDef>(map![(): TypeDef::new()
+                                                  .object::<&str, Kind>(map! {
+                                                      "fruit": Kind::Bytes,
+                                                      "veg": Kind::Bytes,
+                                                      "0": Kind::Bytes | Kind::Null,
+                                                      "1": Kind::Bytes | Kind::Null,
+                                                      "2": Kind::Bytes | Kind::Null,
+                                                  })
+                                                  .add_null()
+            ]),
+        }
+
+        numeric_groups {
+            args: func_args![
+                value: "apples and carrots, peaches and peas",
+                pattern: Regex::new(r#"(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)"#).unwrap(),
+                numeric_groups: true
             ],
             want: Ok(value!([{"fruit": "apples",
                               "veg": "carrots",
@@ -151,7 +155,19 @@ mod tests {
                               "veg": "peas",
                               "0": "peaches and peas",
                               "1": "peaches",
-                              "2": "peas"}]))
+                              "2": "peas"}])),
+            tdef: TypeDef::new()
+                .fallible()
+                .array_mapped::<(), TypeDef>(map![(): TypeDef::new()
+                                                  .object::<&str, Kind>(map! {
+                                                      "fruit": Kind::Bytes,
+                                                      "veg": Kind::Bytes,
+                                                      "0": Kind::Bytes | Kind::Null,
+                                                      "1": Kind::Bytes | Kind::Null,
+                                                      "2": Kind::Bytes | Kind::Null,
+                                                  })
+                                                  .add_null()
+            ]),
         }
 
         no_matches {
@@ -159,8 +175,19 @@ mod tests {
                 value: "I don't match",
                 pattern: Regex::new(r#"(?P<fruit>[\w\.]+) and (?P<veg>[\w]+)"#).unwrap()
             ],
-            want: Ok(value!([]))
+            want: Ok(value!([])),
+            tdef: TypeDef::new()
+                .fallible()
+                .array_mapped::<(), TypeDef>(map![(): TypeDef::new()
+                                                  .object::<&str, Kind>(map! {
+                                                      "fruit": Kind::Bytes,
+                                                      "veg": Kind::Bytes,
+                                                      "0": Kind::Bytes | Kind::Null,
+                                                      "1": Kind::Bytes | Kind::Null,
+                                                      "2": Kind::Bytes | Kind::Null,
+                                                  })
+                                                  .add_null()
+                ]),
         }
     ];
 }
-*/
