@@ -228,7 +228,8 @@ impl HttpSink for ElasticSearchCommon {
 
         self.config.encoding.apply_rules(&mut event);
 
-        serde_json::to_writer(&mut body, &event.into_log()).unwrap();
+        let log = event.into_log();
+        serde_json::to_writer(&mut body, &log).unwrap();
         body.push(b'\n');
 
         emit!(ElasticSearchEventEncoded {
@@ -236,7 +237,7 @@ impl HttpSink for ElasticSearchCommon {
             index
         });
 
-        Some(EncodedEvent::new(body))
+        Some(EncodedEvent::new(body).with_metadata(log))
     }
 
     async fn build_request(&self, events: Self::Output) -> crate::Result<http::Request<Vec<u8>>> {
@@ -707,7 +708,6 @@ mod integration_tests {
     use super::*;
     use crate::{
         config::{SinkConfig, SinkContext},
-        event::Event,
         http::HttpClient,
         test_util::{random_events_with_stream, random_string, trace_init},
         tls::{self, TlsOptions},
@@ -717,6 +717,7 @@ mod integration_tests {
     use hyper::Body;
     use serde_json::{json, Value};
     use std::{fs::File, future::ready, io::Read};
+    use vector_core::event::{BatchNotifier, BatchStatus, BatchStatusReceiver, Event, LogEvent};
 
     #[test]
     fn ensure_pipeline_in_params() {
@@ -751,13 +752,19 @@ mod integration_tests {
         let cx = SinkContext::new_test();
         let (sink, _hc) = config.build(cx.clone()).await.unwrap();
 
-        let mut input_event = Event::from("raw log line");
-        input_event.as_mut_log().insert("my_id", "42");
-        input_event.as_mut_log().insert("foo", "bar");
+        let (batch, mut receiver) = BatchNotifier::new_with_receiver();
+        let mut input_event = LogEvent::from("raw log line").with_batch_notifier(&batch);
+        input_event.insert("my_id", "42");
+        input_event.insert("foo", "bar");
+        drop(batch);
 
-        sink.run(stream::once(ready(input_event.clone())))
+        let timestamp = input_event[crate::config::log_schema().timestamp_key()].clone();
+
+        sink.run(stream::once(ready(input_event.into())))
             .await
             .unwrap();
+
+        assert_eq!(receiver.try_recv(), Ok(BatchStatus::Delivered));
 
         // make sure writes all all visible
         flush(common).await.unwrap();
@@ -794,7 +801,7 @@ mod integration_tests {
         let expected = json!({
             "message": "raw log line",
             "foo": "bar",
-            "timestamp": input_event.as_log()[crate::config::log_schema().timestamp_key()],
+            "timestamp": timestamp,
         });
         assert_eq!(&expected, value);
     }
@@ -811,6 +818,7 @@ mod integration_tests {
                 ..config()
             },
             false,
+            BatchStatus::Delivered,
         )
         .await;
     }
@@ -831,6 +839,7 @@ mod integration_tests {
                 ..config()
             },
             false,
+            BatchStatus::Delivered,
         )
         .await;
     }
@@ -846,6 +855,7 @@ mod integration_tests {
                 ..config()
             },
             false,
+            BatchStatus::Delivered,
         )
         .await;
     }
@@ -862,6 +872,7 @@ mod integration_tests {
                 ..config()
             },
             false,
+            BatchStatus::Delivered,
         )
         .await;
     }
@@ -878,11 +889,16 @@ mod integration_tests {
                 ..config()
             },
             true,
+            BatchStatus::Failed,
         )
         .await;
     }
 
-    async fn run_insert_tests(mut config: ElasticSearchConfig, break_events: bool) {
+    async fn run_insert_tests(
+        mut config: ElasticSearchConfig,
+        break_events: bool,
+        batch_status: BatchStatus,
+    ) {
         let index = gen_index();
         config.index = Some(index.clone());
         let common = ElasticSearchCommon::parse_config(&config).expect("Config error");
@@ -896,7 +912,8 @@ mod integration_tests {
 
         healthcheck.await.expect("Health check failed");
 
-        let (input, events) = random_events_with_stream(100, 100, None);
+        let (batch, mut receiver) = BatchNotifier::new_with_receiver();
+        let (input, events) = random_events_with_stream(100, 100, Some(batch));
         if break_events {
             // Break all but the first event to simulate some kind of partial failure
             let mut doit = false;
@@ -912,6 +929,8 @@ mod integration_tests {
         } else {
             sink.run(events).await.expect("Sending events failed");
         }
+
+        assert_eq!(receiver.try_recv(), Ok(batch_status));
 
         // make sure writes all all visible
         flush(common).await.expect("Flushing writes failed");
