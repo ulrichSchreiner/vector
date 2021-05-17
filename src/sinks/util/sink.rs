@@ -91,6 +91,7 @@ pub trait StreamSink {
 #[derive(Debug)]
 pub struct BatchSink<S, B>
 where
+    S: Service<B::Output>,
     B: Batch,
 {
     #[pin]
@@ -106,7 +107,7 @@ where
     S: Service<B::Output>,
     S::Future: Send + 'static,
     S::Error: Into<crate::Error> + Send + 'static,
-    S::Response: Response,
+    S::Response: Response + Send + 'static,
     B: Batch,
 {
     pub fn new(service: S, batch: B, timeout: Duration, acker: Acker) -> Self {
@@ -122,6 +123,7 @@ where
 #[cfg(test)]
 impl<S, B> BatchSink<S, B>
 where
+    S: Service<B::Output>,
     B: Batch,
 {
     pub fn get_ref(&self) -> &S {
@@ -184,8 +186,9 @@ where
 pub struct PartitionBatchSink<S, B, K>
 where
     B: Batch,
+    S: Service<B::Output>,
 {
-    service: ServiceSink<S, B::Output>,
+    service: ServiceSink<S, B::Output, StdServiceResultLogic<S::Response>>,
     buffer: Option<(K, EncodedEvent<B::Input>)>,
     batch: StatefulBatch<MetadataBatch<B>>,
     partitions: HashMap<K, StatefulBatch<MetadataBatch<B>>>,
@@ -202,7 +205,7 @@ where
     S: Service<B::Output>,
     S::Future: Send + 'static,
     S::Error: Into<crate::Error> + Send + 'static,
-    S::Response: Response,
+    S::Response: Response + Send + 'static,
 {
     pub fn new(service: S, batch: B, timeout: Duration, acker: Acker) -> Self {
         let service = ServiceSink::new(service, acker);
@@ -353,7 +356,7 @@ where
 
 impl<S, B, K> fmt::Debug for PartitionBatchSink<S, B, K>
 where
-    S: fmt::Debug,
+    S: Service<B::Output> + fmt::Debug,
     B: Batch + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -367,7 +370,7 @@ where
 
 // === ServiceSink ===
 
-struct ServiceSink<S, Request> {
+struct ServiceSink<S, Request, L> {
     service: S,
     in_flight: FuturesUnordered<oneshot::Receiver<(usize, usize)>>,
     acker: Acker,
@@ -375,17 +378,31 @@ struct ServiceSink<S, Request> {
     seq_tail: usize,
     pending_acks: HashMap<usize, usize>,
     next_request_id: usize,
+    logic: L,
     _pd: PhantomData<Request>,
 }
 
-impl<S, Request> ServiceSink<S, Request>
+impl<S, Request> ServiceSink<S, Request, StdServiceResultLogic<S::Response>>
+where
+    S: Service<Request>,
+    S::Future: Send + 'static,
+    S::Error: Into<crate::Error> + Send + 'static,
+    S::Response: Response + Send + 'static,
+{
+    fn new(service: S, acker: Acker) -> Self {
+        Self::new_with_logic(service, acker, StdServiceResultLogic::new())
+    }
+}
+
+impl<S, Request, L> ServiceSink<S, Request, L>
 where
     S: Service<Request>,
     S::Future: Send + 'static,
     S::Error: Into<crate::Error> + Send + 'static,
     S::Response: Response,
+    L: ServiceResultLogic<Response = S::Response> + Send + 'static,
 {
-    fn new(service: S, acker: Acker) -> Self {
+    fn new_with_logic(service: S, acker: Acker, logic: L) -> Self {
         Self {
             service,
             in_flight: FuturesUnordered::new(),
@@ -394,6 +411,7 @@ where
             seq_tail: 0,
             pending_acks: HashMap::new(),
             next_request_id: 0,
+            logic: logic,
             _pd: PhantomData,
         }
     }
@@ -422,31 +440,12 @@ where
             message = "Submitting service request.",
             in_flight_requests = self.in_flight.len()
         );
+        let logic = self.logic;
         self.service
             .call(req)
             .err_into()
             .map(move |result| {
-                let status = match result {
-                    Ok(response) => {
-                        if response.is_successful() {
-                            trace!(message = "Response successful.", ?response);
-                            EventStatus::Delivered
-                        } else if response.is_transient() {
-                            error!(message = "Response wasn't successful.", ?response);
-                            EventStatus::Errored
-                        } else {
-                            error!(message = "Response failed.", ?response);
-                            EventStatus::Failed
-                        }
-                    }
-                    Err(error) => {
-                        error!(message = "Request failed.", %error);
-                        EventStatus::Errored
-                    }
-                };
-                for metadata in metadata {
-                    metadata.update_status(status);
-                }
+                logic.update_metadata(result, metadata);
 
                 // If the rx end is dropped we still completed
                 // the request so this is a weird case that we can
@@ -480,7 +479,7 @@ where
     }
 }
 
-impl<S, Request> fmt::Debug for ServiceSink<S, Request>
+impl<S, Request, L> fmt::Debug for ServiceSink<S, Request, L>
 where
     S: fmt::Debug,
 {
@@ -492,6 +491,60 @@ where
             .field("seq_tail", &self.seq_tail)
             .field("pending_acks", &self.pending_acks)
             .finish()
+    }
+}
+
+// === Response ===
+
+pub trait ServiceResultLogic {
+    type Response: Response;
+
+    fn update_metadata(&self, result: crate::Result<Self::Response>, metadata: Vec<EventMetadata>);
+}
+
+#[derive(Clone, Copy)]
+struct StdServiceResultLogic<R> {
+    _pd: PhantomData<R>,
+}
+
+impl<R> StdServiceResultLogic<R> {
+    fn new() -> Self {
+        Self { _pd: PhantomData }
+    }
+}
+
+impl<R> ServiceResultLogic for StdServiceResultLogic<R>
+where
+    R: Response + Send,
+{
+    type Response = R;
+
+    fn update_metadata(
+        &self,
+        result: crate::Result<Self::Response>,
+        mut metadata: Vec<EventMetadata>,
+    ) {
+        let status = match result {
+            Ok(response) => {
+                if response.is_successful() {
+                    trace!(message = "Response successful.", ?response);
+                    EventStatus::Delivered
+                } else if response.is_transient() {
+                    error!(message = "Response wasn't successful.", ?response);
+                    EventStatus::Errored
+                } else {
+                    error!(message = "Response failed.", ?response);
+                    EventStatus::Failed
+                }
+            }
+            Err(error) => {
+                error!(message = "Request failed.", %error);
+                EventStatus::Errored
+            }
+        };
+        for metadata in metadata {
+            metadata.update_status(status);
+        }
     }
 }
 
