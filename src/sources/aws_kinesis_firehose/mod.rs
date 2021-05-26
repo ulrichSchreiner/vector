@@ -4,7 +4,7 @@ use crate::{
 };
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 pub mod errors;
 mod filters;
@@ -16,13 +16,38 @@ pub struct AwsKinesisFirehoseConfig {
     address: SocketAddr,
     access_key: Option<String>,
     tls: Option<TlsConfig>,
+    record_compression: Option<Compression>,
+}
+
+#[derive(Derivative, Copy, Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+#[derivative(Default)]
+pub enum Compression {
+    #[derivative(Default)]
+    Auto,
+    None,
+    Gzip,
+}
+
+impl fmt::Display for Compression {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        match self {
+            Compression::Auto => write!(fmt, "auto"),
+            Compression::None => write!(fmt, "none"),
+            Compression::Gzip => write!(fmt, "gzip"),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "aws_kinesis_firehose")]
 impl SourceConfig for AwsKinesisFirehoseConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
-        let svc = filters::firehose(self.access_key.clone(), cx.out);
+        let svc = filters::firehose(
+            self.access_key.clone(),
+            self.record_compression.unwrap_or_default().clone(),
+            cx.out,
+        );
 
         let tls = MaybeTlsSettings::from_config(&self.tls, true)?;
         let listener = tls.bind(&self.address).await?;
@@ -62,6 +87,7 @@ impl GenerateConfig for AwsKinesisFirehoseConfig {
             address: "0.0.0.0:443".parse().unwrap(),
             access_key: None,
             tls: None,
+            record_compression: None,
         })
         .unwrap()
     }
