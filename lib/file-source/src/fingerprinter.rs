@@ -158,7 +158,7 @@ fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> 
             Err(e) => return Err(e),
         };
 
-        if let Some(pos) = buf[..read].iter().position(|&c| c == delim) {
+        if let Some(pos) = buf[..read].iter().skip_while(|&c| *c == b'\x00').position(|&c| c == delim) {
             for el in &mut buf[(pos + 1)..] {
                 *el = 0;
             }
