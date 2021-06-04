@@ -153,7 +153,7 @@ impl Fingerprinter {
 }
 
 fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> io::Result<()> {
-    while !buf.is_empty() {
+    'outer: while !buf.is_empty() {
         let mut read = match r.read(buf) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reached")),
             Ok(n) => n,
@@ -161,7 +161,7 @@ fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> 
             Err(e) => return Err(e),
         };
 
-        match buf[..read].iter().position(|&c| c != b'\x00') {
+        match buf[..read].iter().position(|&c| c != b'\x00' ) {
             Some(pos) => {
                 if pos > 0 {
                     buf.copy_within(pos..read, 0);
@@ -170,11 +170,22 @@ fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> 
             },
             None => read = 0,
         }
-        if let Some(pos) = buf[..read].iter().position(|&c| c == delim ) {
-            for el in &mut buf[(pos + 1)..] {
-                *el = 0;
+        while read > 0 {
+            // we search for the first occurence of the delimiter except if we do not
+            // have read anything (files with leading NULLs and a newline without any
+            // other byte)
+            if let Some(pos) = buf[..read].iter().position(|&c| c == delim ) {
+                if pos > 0 {
+                    for el in &mut buf[(pos + 1)..] {
+                        *el = 0;
+                    }
+                    break 'outer;
+                } else {
+                    // skip the newline because we have no byte read
+                    buf.copy_within(pos+1..read, 0);
+                    read -= pos+1;
+                }
             }
-            break;
         }
 
         buf = &mut buf[read..];
@@ -243,13 +254,21 @@ mod test {
         };
 
         let target_dir = tempdir().unwrap();
-        let mut many_zeros = vec![b'\x00'; 1500];
+        let mut many_zeros = vec![b'\x00'; 15000];
+        let dat1 = vec![b'a', b'b', b'c'];
         many_zeros.push(b'x');
+        many_zeros.append(&mut dat1.clone());
         many_zeros.push(b'\n');
-        let mut more_zeros = vec![b'\x00'; 1600];
-        more_zeros.push(b'x');
+        // many_zeros has 15000 leading zerors, followed by "xabc\n"
+        let mut more_zeros = vec![b'\x00'; 16000];
         more_zeros.push(b'\n');
-        let mut more_zeros_diff = vec![b'\x00'; 1600];
+        more_zeros.push(b'x');
+        more_zeros.append(&mut dat1.clone());
+        more_zeros.push(b'\n');
+        // more_zeros has a 16000 leading zeros, followed by "\nxabc\n"
+
+
+        let mut more_zeros_diff = vec![b'\x00'; 16000];
         more_zeros_diff.push(b'y');
         more_zeros_diff.push(b'\n');
 
@@ -262,27 +281,28 @@ mod test {
         fs::write(&diff_path, &more_zeros_diff).unwrap();
 
         let mut buf = Vec::new();
+
         assert!(fingerprinter
-            .get_fingerprint_of_file(&many_path, &mut buf)
-            .is_ok());
+            .get_fingerprint_of_file(&many_path, &mut buf).is_ok());
         assert!(fingerprinter
-            .get_fingerprint_of_file(&more_path, &mut buf)
-            .is_ok());
-        assert_eq!(
+            .get_fingerprint_of_file(&more_path, &mut buf).is_ok());
+        debug_assert_eq!(
             fingerprinter
-                .get_fingerprint_of_file(&many_path, &mut buf)
-                .unwrap(),
+            .get_fingerprint_of_file(&many_path, &mut buf).unwrap().clone(),
             fingerprinter
-                .get_fingerprint_of_file(&more_path, &mut buf)
-                .unwrap(),
+            .get_fingerprint_of_file(&more_path, &mut buf).unwrap().clone(),
         );
         assert_ne!(
             fingerprinter
-                .get_fingerprint_of_file(&many_path, &mut buf)
-                .unwrap(),
+            .get_fingerprint_of_file(&many_path, &mut buf).unwrap(),
             fingerprinter
-                .get_fingerprint_of_file(&diff_path, &mut buf)
-                .unwrap(),
+            .get_fingerprint_of_file(&diff_path, &mut buf).unwrap(),
+        );
+        assert_ne!(
+            fingerprinter
+            .get_fingerprint_of_file(&more_path, &mut buf).unwrap(),
+            fingerprinter
+            .get_fingerprint_of_file(&diff_path, &mut buf).unwrap(),
         );
     }
 
