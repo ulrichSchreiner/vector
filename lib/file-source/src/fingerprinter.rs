@@ -160,11 +160,15 @@ fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> 
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        if let Some(pos) = buf[..read].iter().position(|&c| c != b'\x00') {
-            if pos > 0 {
-                buf.copy_within(pos..read, 0);
-                read -= pos;
-            }
+
+        match buf[..read].iter().position(|&c| c != b'\x00') {
+            Some(pos) => {
+                if pos > 0 {
+                    buf.copy_within(pos..read, 0);
+                    read -= pos;
+                }
+            },
+            None => read = 0,
         }
         if let Some(pos) = buf[..read].iter().position(|&c| c == delim ) {
             for el in &mut buf[(pos + 1)..] {
@@ -224,6 +228,60 @@ mod test {
                 .unwrap(),
             fingerprinter
                 .get_fingerprint_of_file(&duplicate_path, &mut buf)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_checksum_fingerprint_zerofilled() {
+        let fingerprinter = Fingerprinter {
+            strategy: FingerprintStrategy::FirstLineChecksum {
+                ignored_header_bytes: 0,
+            },
+            max_line_length: 1024,
+            ignore_not_found: false,
+        };
+
+        let target_dir = tempdir().unwrap();
+        let mut many_zeros = vec![b'\x00'; 1500];
+        many_zeros.push(b'x');
+        many_zeros.push(b'\n');
+        let mut more_zeros = vec![b'\x00'; 1600];
+        more_zeros.push(b'x');
+        more_zeros.push(b'\n');
+        let mut more_zeros_diff = vec![b'\x00'; 1600];
+        more_zeros_diff.push(b'y');
+        more_zeros_diff.push(b'\n');
+
+        let many_path = target_dir.path().join("many.log");
+        let more_path = target_dir.path().join("more.log");
+        let diff_path = target_dir.path().join("morediff.log");
+
+        fs::write(&many_path, &many_zeros).unwrap();
+        fs::write(&more_path, &more_zeros).unwrap();
+        fs::write(&diff_path, &more_zeros_diff).unwrap();
+
+        let mut buf = Vec::new();
+        assert!(fingerprinter
+            .get_fingerprint_of_file(&many_path, &mut buf)
+            .is_ok());
+        assert!(fingerprinter
+            .get_fingerprint_of_file(&more_path, &mut buf)
+            .is_ok());
+        assert_eq!(
+            fingerprinter
+                .get_fingerprint_of_file(&many_path, &mut buf)
+                .unwrap(),
+            fingerprinter
+                .get_fingerprint_of_file(&more_path, &mut buf)
+                .unwrap(),
+        );
+        assert_ne!(
+            fingerprinter
+                .get_fingerprint_of_file(&many_path, &mut buf)
+                .unwrap(),
+            fingerprinter
+                .get_fingerprint_of_file(&diff_path, &mut buf)
                 .unwrap(),
         );
     }
