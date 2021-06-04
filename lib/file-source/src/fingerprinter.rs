@@ -163,7 +163,7 @@ fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> 
         if let Some(pos) = buf[..read].iter().position(|&c| c != b'\x00') {
             if pos > 0 {
                 buf.copy_within(pos..read, 0);
-                read -= 1;
+                read -= pos;
             }
         }
         if let Some(pos) = buf[..read].iter().position(|&c| c == delim ) {
