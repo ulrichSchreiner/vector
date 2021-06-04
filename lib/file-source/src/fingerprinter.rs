@@ -154,14 +154,19 @@ impl Fingerprinter {
 
 fn fingerprinter_read_until(mut r: impl Read, delim: u8, mut buf: &mut [u8]) -> io::Result<()> {
     while !buf.is_empty() {
-        let read = match r.read(buf) {
+        let mut read = match r.read(buf) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reached")),
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-
-        if let Some(pos) = buf[..read].iter().skip_while(|&c| *c == b'\x00').position(|&c| c == delim) {
+        if let Some(pos) = buf[..read].iter().position(|&c| c != b'\x00') {
+            if pos > 0 {
+                buf.copy_within(pos..read, 0);
+                read -= 1;
+            }
+        }
+        if let Some(pos) = buf[..read].iter().position(|&c| c == delim ) {
             for el in &mut buf[(pos + 1)..] {
                 *el = 0;
             }
@@ -256,8 +261,8 @@ mod test {
 
         let empty = prepare_test("empty.log", b"");
         let incomlete_line = prepare_test("incomlete_line.log", b"missing newline char");
-        let one_line = prepare_test("one_line.log", b"hello world\n");
-        let one_line_duplicate = prepare_test("one_line_duplicate.log", b"hello world\n");
+        let one_line = prepare_test("one_line.log", b"\x00\x00hello world\n");
+        let one_line_duplicate = prepare_test("one_line_duplicate.log", b"\x00hello world\n");
         let one_line_continued =
             prepare_test("one_line_continued.log", b"hello world\nthe next line\n");
         let different_two_lines = prepare_test("different_two_lines.log", b"line one\nline two\n");
